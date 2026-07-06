@@ -1,0 +1,10 @@
+# Local environment — never commit
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

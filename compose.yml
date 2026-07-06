@@ -74,13 +74,18 @@ services:
     container_name: home-jaram-frontend-dev
     restart: unless-stopped
     logging: *default-logging
-    depends_on:
-      backend-dev:
-        condition: service_healthy
+    # NOTE: frontend는 정적 nginx 서비스라 backend 상태와 무관하게 떠야 함.
+    #       API 실패는 브라우저/앱 레벨에서 확인. backend health에 강하게 묶지 않음.
     ports:
       - "${HOST_BIND:-127.0.0.1}:${FRONTEND_DEV_PORT:-3001}:80"
     networks:
       - jaram-dev
+    environment:
+      # 브라우저가 호출할 BE URL. 컨테이너 내부 주소(backend-dev:8080) 아님.
+      # nginx entrypoint(docker/30-configjs.sh on FE image)가 /config.js로 bake.
+      # cloudflared 도입 전: http://localhost:8081 (host port)
+      # cloudflared 도입 후: https://dev-api.jaram.net
+      API_BASE_URL: ${FRONTEND_DEV_API_BASE_URL:-http://localhost:8081}
     healthcheck:
       # nginx:alpine busybox wget — any HTTP response counts as alive.
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]

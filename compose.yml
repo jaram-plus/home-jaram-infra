@@ -1,0 +1,115 @@
+# Docker Compose for home-jaram dev environment (1차: postgres + backend-dev + frontend-dev).
+#
+# image-only — no build context. Pulls prebuilt images from GHCR.
+# Designed to run on the VM at /srv/jaram/infra after `git clone`.
+#
+# Expandable in subsequent iterations:
+#   2차: add backend-prod, frontend-prod (separate DB or same instance)
+#   3차: add garage (S3-compatible object storage)
+#   4차: add cloudflared (tunnel ingress for jaram.net / dev.jaram.net)
+
+name: home-jaram
+
+# Reusable logging anchor — keeps json-file driver from filling VM disk.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: home-jaram-db-dev
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: ${DB_NAME:-jaram_dev}
+      POSTGRES_USER: ${DB_USER:-jaram_dev}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      TZ: ${TZ:-Asia/Seoul}
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    networks:
+      - jaram-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend-dev:
+    image: ghcr.io/jaram-plus/home-jaram-be:${BACKEND_DEV_TAG:-develop}
+    container_name: home-jaram-backend-dev
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      DB_URL: ${DB_URL:-jdbc:postgresql://db:5432/jaram_dev}
+      DB_USER: ${DB_USER:-jaram_dev}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3001}
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${BACKEND_DEV_PORT:-8081}:8080"
+    networks:
+      - jaram-dev
+    healthcheck:
+      # NOTE: Spring Actuator 미도입 상태라 비즈니스 엔드포인트에 의존하지 않음.
+      #       curl이 -f 없이 HTTP 응답 자체(상태 무관)를 liveness로 간주.
+      #       TODO: BE에 spring-boot-starter-actuator 추가 후
+      #             `curl -fsS http://localhost:8080/actuator/health`로 교체.
+      test: ["CMD-SHELL", "curl -s -o /dev/null http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  frontend-dev:
+    image: ghcr.io/jaram-plus/home-jaram-fe:${FRONTEND_DEV_TAG:-develop}
+    container_name: home-jaram-frontend-dev
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      backend-dev:
+        condition: service_healthy
+    ports:
+      - "${HOST_BIND:-127.0.0.1}:${FRONTEND_DEV_PORT:-3001}:80"
+    networks:
+      - jaram-dev
+    healthcheck:
+      # nginx:alpine busybox wget — any HTTP response counts as alive.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # -----------------------------------------------------------------------
+  # 2차 compose 확장 위치:
+  #   frontend-prod, backend-prod 추가. 같은 postgres 인스턴스에 prod DB 별도
+  #   생성하거나 별도 postgres 서비스로 분리. tag는 :main 사용.
+  # -----------------------------------------------------------------------
+
+  # -----------------------------------------------------------------------
+  # 3차 compose 확장 위치:
+  #   garage (S3-compatible). dev/prod bucket 분리.
+  # -----------------------------------------------------------------------
+
+  # -----------------------------------------------------------------------
+  # 4차 compose 확장 위치:
+  #   cloudflared. ingress: jaram.net / api.jaram.net / dev.jaram.net /
+  #   dev-api.jaram.net. tunnel credentials는 볼륨 마운트로 주입.
+  # -----------------------------------------------------------------------
+
+networks:
+  jaram-dev:
+    name: home-jaram-dev
+
+volumes:
+  postgres_dev_data:
+    name: home-jaram-postgres-dev-data

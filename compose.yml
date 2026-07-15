@@ -85,7 +85,7 @@ services:
       # 브라우저가 호출할 BE URL. 컨테이너 내부 주소(backend-dev:8080) 아님.
       # nginx entrypoint(docker/30-configjs.sh on FE image)가 /config.js로 bake.
       # cloudflared 도입 전: http://localhost:8081 (host port)
-      # cloudflared 도입 후: https://dev-api.jaram.net
+      # cloudflared 도입 후: https://devapi.jaram.net
       API_BASE_URL: ${FRONTEND_DEV_API_BASE_URL:-http://localhost:8081}
     healthcheck:
       # nginx:alpine busybox wget — any HTTP response counts as alive.

@@ -8,3 +8,6 @@
 .idea/
 .vscode/
 *.swp
+
+# Tooling (OpenCode session data)
+.omo/

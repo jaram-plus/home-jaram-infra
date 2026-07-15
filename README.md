@@ -28,7 +28,8 @@ cd infra
 
 - 2차: `backend-prod`, `frontend-prod` (`:main` 태그)
 - 3차: `garage` (S3 호환 객체 스토리지)
-- self-hosted runner + deploy job (FE/BE 레포의 `image.yml`)
+- self-hosted runner는 설치 완료 (`scripts/install-actions-runner.sh` 참고)
+- deploy job만 남음 — FE/BE 레포의 `image.yml`에서 self-hosted runner 사용
 
 ## VM에서 1차 수동 검증
 
@@ -195,6 +196,91 @@ curl -s https://dev.jaram.net/config.js
 - `TUNNEL_TOKEN`, `CF_API_TOKEN`은 시크릿 — `.env`에만 두고 커밋 금지
 - ingress rule은 tunnel 재시작 없이 API/dashboard 변경 시 ~30초 내 반영
 
+## Self-hosted runner (GitHub Actions org runner)
+
+Org runner 하나가 VM에서 가동 중. FE/BE 레포의 workflow에서 deploy job을 실행할 때 사용.
+
+### 구성
+
+| 항목 | 값 |
+|---|---|
+| org | `jaram-plus` |
+| runner group | `jaram-deploy` (repo access: `home-jaram-fe`, `home-jaram-be`) |
+| labels | `self-hosted`, `linux`, `x64`, `jaram-vm`, `deploy` |
+| 실행 사용자 | `github-runner` (`docker` group 소속 → `docker compose` 실행 가능) |
+| 설치 경로 | `/home/github-runner/actions-runner` |
+| systemd service | `actions.runner.jaram-plus.<host>.service` (enabled, 부팅 시 자동 시작) |
+
+### 사전 준비 (Dashboard)
+
+1. https://github.com/organizations/jaram-plus/settings/actions → Runner groups → New runner group
+   - 이름: `jaram-deploy`
+   - Repository access: **Selected repositories** → `home-jaram-fe`, `home-jaram-be`
+2. 생성된 `jaram-deploy` 그룹 클릭 → **Add runner** → **New self-hosted runner** → **Linux x64**
+3. 표시된 명령어에서 `--token` 뒤의 문자열만 복사 (1회성, 약 1시간 유효, 시크릿)
+
+### 설치 (VM)
+
+```bash
+sudo ./scripts/install-actions-runner.sh '<TOKEN>' jaram-deploy
+```
+
+스크립트 동작 (idempotent, 재실행 시 이미 있으면 skip):
+- `docker` group 존재 확인
+- `actions/runner` tarball 다운로드 + SHA256 검증
+- `github-runner` 유저 생성 + `docker` group 추가
+- `/home/github-runner/actions-runner` 에 tarball extract
+- `config.sh --url ... --token ... --labels ... --runnergroup jaram-deploy` 실행
+- `svc.sh install github-runner` → systemd unit 등록
+- 서비스 enable + start
+
+주의: 매 실행 시 `systemctl restart`가 호출됨. 운영 중 재실행은 runner가 잡을 잡고 있지 않은 Idle 상태에서만 권장.
+
+### 동작 확인
+
+```bash
+# systemd
+systemctl is-active actions.runner.jaram-plus.server.service   # active
+systemctl is-enabled actions.runner.jaram-plus.server.service   # enabled
+
+# journal — "Listening for Jobs" 가 보이면 online
+journalctl -u actions.runner.jaram-plus.server.service -n 20 --no-pager
+
+# github-runner 가 docker 사용 가능한지
+sudo -u github-runner docker ps
+
+# Dashboard — runner 상태 Idle, labels 5개 표시 확인
+# https://github.com/organizations/jaram-plus/settings/actions/runners
+```
+
+### 유지보수
+
+**버전 업그레이드:**
+1. `scripts/install-actions-runner.sh` 상단 `RUNNER_VERSION`, `RUNNER_SHA256` 업데이트
+   - SHA256 출처: `https://api.github.com/repos/actions/runner/releases/latest` 에서
+     asset `actions-runner-linux-x64-<VERSION>.tar.gz`의 `digest` 필드
+2. 서비스 중지: `sudo systemctl stop actions.runner.jaram-plus.server.service`
+3. install dir 제거: `sudo rm -rf /home/github-runner/actions-runner`
+4. 캐시 tarball 제거: `rm /tmp/actions-runner-linux-x64-*.tar.gz`
+5. 스크립트 재실행 (새 등록 token 필요)
+
+**runner 제거:**
+```bash
+sudo systemctl stop    actions.runner.jaram-plus.server.service
+sudo systemctl disable actions.runner.jaram-plus.server.service
+sudo rm /etc/systemd/system/actions.runner.jaram-plus.server.service
+sudo systemctl daemon-reload
+# GitHub Dashboard에서 runner 삭제 (offline 표시 후 Remove) — 또는:
+cd /home/github-runner/actions-runner && sudo -u github-runner ./config.sh remove --token <TOKEN>
+sudo rm -rf /home/github-runner/actions-runner
+```
+
+### 주의사항
+
+- 등록 token은 1회성 시크릿 — 스크립트 로그에 출력되지 않음
+- `jaram-deploy` group이 `home-jaram-fe`, `home-jaram-be` 에만 접근 허용. 다른 repo에서 이 runner를 사용하려면 Dashboard에서 그룹의 repository access에 추가 필요
+- runner working directory (`_work/`)가 커질 수 있음 — 주기적 확인 권장
+
 ## 주의사항
 
 - `HOST_BIND=127.0.0.1` 기본값 — cloudflared 붙기 전엔 VM 내부에서만 접근 가능. Tailscale로 외부 접속 테스트하려면 `0.0.0.0` 또는 해당 인터페이스 IP로 변경
@@ -211,7 +297,8 @@ curl -s https://dev.jaram.net/config.js
 ├── scripts/
 │   ├── deploy-frontend.sh               # pull + up --wait + ps
 │   ├── deploy-backend.sh                # 동일
-│   └── configure-cloudflare-tunnel.sh   # CF API로 tunnel ingress rule 주입
+│   ├── configure-cloudflare-tunnel.sh   # CF API로 tunnel ingress rule 주입
+│   └── install-actions-runner.sh        # org self-hosted runner 설치 (idempotent)
 └── README.md                            # 이 파일
 ```
 
@@ -221,4 +308,5 @@ compose.yml 내 주석으로 표시된 확장 자리:
 - **2차** — `backend-prod`, `frontend-prod` (같은 postgres에 prod DB 추가 또는 분리)
 - **3차** — `garage` (S3 호환 스토리지, dev/prod bucket 분리)
 
-self-hosted runner + deploy job은 FE/BE 각 레포의 `.github/workflows/image.yml` 하단 주석 참고.
+self-hosted runner는 본 VM에 설치 완료 (`scripts/install-actions-runner.sh`).
+deploy job만 남음 — FE/BE 각 레포의 `.github/workflows/image.yml` 하단 주석 참고.
